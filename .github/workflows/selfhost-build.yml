@@ -1,0 +1,69 @@
+# Builds a self-hostable copy of the site (relative paths, works in any folder)
+# and publishes it as the "self-host" release: re-rebirth.zip.
+# Runs on every push to main, which includes pressing "Sync fork" on GitHub.
+# Stable download URL:
+#   https://github.com/TheoGal/re-rebirth/releases/download/self-host/re-rebirth.zip
+name: Self-host build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: self-host-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build with relative paths
+        run: npx vite build --base=./
+
+      - name: Make manifest paths relative
+        # public/manifest.webmanifest is copied as-is, so Vite's base does not touch it.
+        run: |
+          sed -i 's#"start_url": "/"#"start_url": "./"#; s#"src": "/#"src": "./#g' dist/manifest.webmanifest
+          if grep -q '"/' dist/manifest.webmanifest; then echo "Absolute path left in manifest"; exit 1; fi
+          if grep -qE '(src|href)="/' dist/index.html; then echo "Absolute path left in index.html"; exit 1; fi
+
+      - name: Package
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHA=$(git rev-parse --short HEAD)
+          echo "$VERSION ($SHA)" > dist/VERSION.txt
+          (cd dist && zip -rq ../re-rebirth.zip .)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the self-host release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          SHA: ${{ steps.pkg.outputs.sha }}
+        run: |
+          NOTES="Re-Rebirth $VERSION, commit $SHA, built $(date -u +'%Y-%m-%d %H:%M UTC').
+          Static files with relative paths: unzip into any folder and serve it."
+          git tag -f self-host
+          git push -f origin refs/tags/self-host
+          if gh release view self-host >/dev/null 2>&1; then
+            gh release edit self-host --title "Self-host build $VERSION ($SHA)" --notes "$NOTES"
+          else
+            gh release create self-host --title "Self-host build $VERSION ($SHA)" --notes "$NOTES" --latest
+          fi
+          gh release upload self-host re-rebirth.zip --clobber
